@@ -9,7 +9,6 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from dataclasses import dataclass
-from collections import deque
 
 import tkinter as tk
 
@@ -85,10 +84,6 @@ def run_dummy_overlay(calibration: CalibrationResult, camera_index: int = 0, sho
         target_rect_ids[target.name] = rect_id
         target_text_ids[target.name] = text_id
 
-    # Heatmap parameters (running average of last N predicted points)
-    # Lower maxlen = more responsive, higher = more stable.
-    history = deque(maxlen=15)
-
     gaze = CameraGaze(camera_index=camera_index)
     gaze.start()
 
@@ -133,10 +128,6 @@ def run_dummy_overlay(calibration: CalibrationResult, camera_index: int = 0, sho
             canvas.itemconfigure(rect_id, outline=("yellow" if is_active else "white"))
             canvas.itemconfigure(text_id, fill=("yellow" if is_active else "white"))
 
-    smooth_x = float(screen_width // 2)
-    smooth_y = float(screen_height // 2)
-    alpha = 0.35  # higher = more responsive, lower = smoother
-
     def _predict_axis(coef: list[float], features_list: list[float]) -> float:
         # coef length should be 1 + len(features_list)
         v = [1.0, *features_list]
@@ -144,7 +135,6 @@ def run_dummy_overlay(calibration: CalibrationResult, camera_index: int = 0, sho
         return float(sum(v[i] * coef[i] for i in range(n)))
 
     def predict_and_draw() -> None:
-        nonlocal smooth_x, smooth_y
         features, err = gaze.get_latest()
         if err is not None or features is None:
             canvas.itemconfigure(status_id, text=f"Camera status: {err or 'no face'}")
@@ -152,16 +142,7 @@ def run_dummy_overlay(calibration: CalibrationResult, camera_index: int = 0, sho
             return
 
         # Linear prediction using calibration coefficients.
-        # Normalize head pose using face-calibration ranges.
-        f2 = features
-        try:
-            ny = (features.yaw_deg - calibration.pose_center_yaw) / max(1e-6, calibration.pose_range_yaw)
-            np_ = (features.pitch_deg - calibration.pose_center_pitch) / max(1e-6, calibration.pose_range_pitch)
-            nr = (features.roll_deg - calibration.pose_center_roll) / max(1e-6, calibration.pose_range_roll)
-            # Rebuild the list in the same order as GazeFeatures.as_list()
-            f = [features.left_x, features.left_y, features.right_x, features.right_y, float(ny), float(np_), float(nr), features.face_scale]
-        except Exception:
-            f = f2.as_list()
+        f = features.as_list()
 
         x = _predict_axis(calibration.coef_x, f)
         y = _predict_axis(calibration.coef_y, f)
@@ -170,17 +151,9 @@ def run_dummy_overlay(calibration: CalibrationResult, camera_index: int = 0, sho
         xi = int(max(0, min(screen_width - 1, x)))
         yi = int(max(0, min(screen_height - 1, y)))
 
-        # Smooth to reduce jitter (especially noticeable during head turns).
-        smooth_x = (1.0 - alpha) * smooth_x + alpha * xi
-        smooth_y = (1.0 - alpha) * smooth_y + alpha * yi
-
-        history.append((smooth_x, smooth_y))
-        avg_x = int(sum(p[0] for p in history) / len(history))
-        avg_y = int(sum(p[1] for p in history) / len(history))
-
         canvas.itemconfigure(status_id, text="Camera status: tracking")
-        draw_heatmap(avg_x, avg_y)
-        set_gaze(avg_x, avg_y)
+        draw_heatmap(xi, yi)
+        set_gaze(xi, yi)
         root.after(33, predict_and_draw)
 
     root.bind("<Escape>", on_escape)

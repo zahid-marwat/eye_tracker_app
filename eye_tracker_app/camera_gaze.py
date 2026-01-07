@@ -11,18 +11,13 @@ from typing import Optional
 class GazeFeatures:
     """Feature vector used for calibration and gaze prediction.
 
-    Includes eye iris position features plus simple head pose estimates so
-    the pointer remains stable when the face turns left/right/up/down.
+    Eyes-only: iris position features (no face pose/center/scale).
     """
 
     left_x: float
     left_y: float
     right_x: float
     right_y: float
-    yaw_deg: float
-    pitch_deg: float
-    roll_deg: float
-    face_scale: float
 
     def as_list(self) -> list[float]:
         return [
@@ -30,10 +25,6 @@ class GazeFeatures:
             self.left_y,
             self.right_x,
             self.right_y,
-            self.yaw_deg,
-            self.pitch_deg,
-            self.roll_deg,
-            self.face_scale,
         ]
 
 
@@ -183,23 +174,14 @@ class CameraGaze:
 
                 face_landmarks = result.face_landmarks[0]
 
-                # Build a zoomed preview crop centered on the face so it's easier
-                # to see whether iris/eye landmarks are being tracked.
-                preview, face_scale = _make_composite_preview(frame, face_landmarks, self._preview_width)
+                # Eye-only zoomed preview for readability.
+                preview = _make_eye_only_preview(frame, face_landmarks, self._preview_width)
 
                 # Composite preview already includes eye/iris overlays.
                 if preview is not None:
                     self._set_preview_frame(preview)
 
-                yaw_deg, pitch_deg, roll_deg = _estimate_head_pose(face_landmarks, frame_w, frame_h)
-
-                features = _extract_gaze_features(
-                    face_landmarks,
-                    yaw_deg=yaw_deg,
-                    pitch_deg=pitch_deg,
-                    roll_deg=roll_deg,
-                    face_scale=face_scale,
-                )
+                features = _extract_gaze_features(face_landmarks)
                 self._set_latest(features, None)
         finally:
             try:
@@ -270,11 +252,6 @@ def _normalize_point(p: tuple[float, float], a: tuple[float, float], b: tuple[fl
 
 def _extract_gaze_features(
     face_landmarks,
-    *,
-    yaw_deg: float,
-    pitch_deg: float,
-    roll_deg: float,
-    face_scale: float,
 ) -> GazeFeatures:
     """Compute gaze features from iris centers + head pose.
 
@@ -317,10 +294,6 @@ def _extract_gaze_features(
         left_y=clamp(left_y),
         right_x=clamp(right_x),
         right_y=clamp(right_y),
-        yaw_deg=float(yaw_deg),
-        pitch_deg=float(pitch_deg),
-        roll_deg=float(roll_deg),
-        face_scale=float(face_scale),
     )
 
 
@@ -335,62 +308,6 @@ def _resize_keep_aspect(frame_bgr, target_w: int):
         return cv2.resize(frame_bgr, (int(target_w), int(target_h)))
     except Exception:
         return None
-
-
-def _make_face_zoom_preview(frame_bgr, face_landmarks, target_w: int):
-    """Crop around the face and resize for a 'zoomed-in' preview.
-
-    Returns (preview_bgr, face_scale) where face_scale is face width / frame width.
-    """
-
-    try:
-        import cv2  # type: ignore
-
-        h, w = frame_bgr.shape[:2]
-        xs = [lm.x for lm in face_landmarks]
-        ys = [lm.y for lm in face_landmarks]
-
-        min_x = max(0.0, min(xs))
-        max_x = min(1.0, max(xs))
-        min_y = max(0.0, min(ys))
-        max_y = min(1.0, max(ys))
-
-        # Add margin so the crop includes forehead/chin even when turning.
-        margin_x = (max_x - min_x) * 0.25
-        margin_y = (max_y - min_y) * 0.35
-
-        min_x = max(0.0, min_x - margin_x)
-        max_x = min(1.0, max_x + margin_x)
-        min_y = max(0.0, min_y - margin_y)
-        max_y = min(1.0, max_y + margin_y)
-
-        x1 = int(min_x * w)
-        x2 = int(max_x * w)
-        y1 = int(min_y * h)
-        y2 = int(max_y * h)
-
-        if x2 - x1 < 10 or y2 - y1 < 10:
-            return None, 0.0
-
-        face_scale = float((x2 - x1) / max(1, w))
-        crop = frame_bgr[y1:y2, x1:x2]
-        preview = _resize_keep_aspect(crop, target_w)
-
-        if preview is not None and face_scale < 0.22:
-            cv2.putText(
-                preview,
-                "Move closer to camera",
-                (10, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-
-        return preview, face_scale
-    except Exception:
-        return None, 0.0
 
 
 def _make_eye_crop(frame_bgr, face_landmarks, idxs: tuple[int, ...], margin: float = 0.35):
@@ -452,120 +369,44 @@ def _draw_iris_dot(eye_bgr, crop_bounds: tuple[int, int, int, int], face_landmar
         return
 
 
-def _make_composite_preview(frame_bgr, face_landmarks, target_w: int):
-    """Create a composite preview: face zoom + left/right eye zooms."""
+def _make_eye_only_preview(frame_bgr, face_landmarks, target_w: int):
+    """Create an eye-only preview (bigger eye crops for readability)."""
 
     try:
         import cv2  # type: ignore
 
-        face_preview, face_scale = _make_face_zoom_preview(frame_bgr, face_landmarks, target_w)
-        if face_preview is None:
-            return _resize_keep_aspect(frame_bgr, target_w), 0.0
-
         frame_h, frame_w = frame_bgr.shape[:2]
 
-        # Eye crops from the original frame.
-        left_eye_pack = _make_eye_crop(frame_bgr, face_landmarks, (33, 133, 159, 145, 468, 469, 470, 471))
-        right_eye_pack = _make_eye_crop(frame_bgr, face_landmarks, (362, 263, 386, 374, 473, 474, 475, 476))
+        # Use a larger margin so the crop stays stable and readable.
+        left_eye_pack = _make_eye_crop(frame_bgr, face_landmarks, (33, 133, 159, 145, 468, 469, 470, 471), margin=0.65)
+        right_eye_pack = _make_eye_crop(frame_bgr, face_landmarks, (362, 263, 386, 374, 473, 474, 475, 476), margin=0.65)
 
         left_eye = None
         right_eye = None
         if left_eye_pack is not None:
             left_eye_raw, left_bounds = left_eye_pack
             _draw_iris_dot(left_eye_raw, left_bounds, face_landmarks, (468, 469, 470, 471), frame_w, frame_h)
-            left_eye = _resize_keep_aspect(left_eye_raw, target_w)
+            left_eye = _resize_keep_aspect(left_eye_raw, max(1, int(target_w * 1.35)))
         if right_eye_pack is not None:
             right_eye_raw, right_bounds = right_eye_pack
             _draw_iris_dot(right_eye_raw, right_bounds, face_landmarks, (473, 474, 475, 476), frame_w, frame_h)
-            right_eye = _resize_keep_aspect(right_eye_raw, target_w)
+            right_eye = _resize_keep_aspect(right_eye_raw, max(1, int(target_w * 1.35)))
 
         if left_eye is not None:
-            cv2.putText(left_eye, "left eye", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(left_eye, "left eye", (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
         if right_eye is not None:
-            cv2.putText(right_eye, "right eye", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(right_eye, "right eye", (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
 
-        # Stack eyes vertically on the right.
         if left_eye is not None and right_eye is not None:
-            eye_stack = cv2.vconcat([left_eye, right_eye])
-        elif left_eye is not None:
-            eye_stack = left_eye
-        elif right_eye is not None:
-            eye_stack = right_eye
-        else:
-            eye_stack = None
+            return cv2.vconcat([left_eye, right_eye])
+        if left_eye is not None:
+            return left_eye
+        if right_eye is not None:
+            return right_eye
 
-        if eye_stack is None:
-            return face_preview, face_scale
-
-        # Match heights by resizing eye stack.
-        fh, fw = face_preview.shape[:2]
-        eh, ew = eye_stack.shape[:2]
-        if eh != fh:
-            eye_stack = cv2.resize(eye_stack, (int(ew * (fh / max(1, eh))), fh))
-
-        composite = cv2.hconcat([face_preview, eye_stack])
-        return composite, face_scale
+        return _resize_keep_aspect(frame_bgr, target_w)
     except Exception:
-        return _resize_keep_aspect(frame_bgr, target_w), 0.0
-
-
-def _estimate_head_pose(face_landmarks, image_w: int, image_h: int) -> tuple[float, float, float]:
-    """Estimate head pose in degrees (yaw, pitch, roll) using a small 2D-3D solvePnP.
-
-    This is approximate but helps stabilize gaze when the face turns.
-    """
-
-    try:
-        import cv2  # type: ignore
-        import numpy as np  # type: ignore
-
-        # 2D image points from FaceMesh indices.
-        # Nose tip, chin, left eye outer, right eye outer, left mouth, right mouth.
-        idxs = [1, 152, 33, 263, 61, 291]
-        image_points = []
-        for idx in idxs:
-            lm = face_landmarks[idx]
-            image_points.append([lm.x * image_w, lm.y * image_h])
-        image_points = np.asarray(image_points, dtype=np.float64)
-
-        # Generic 3D model points (millimeters-ish). These are standard approximate values.
-        model_points = np.asarray(
-            [
-                (0.0, 0.0, 0.0),
-                (0.0, -330.0, -65.0),
-                (-225.0, 170.0, -135.0),
-                (225.0, 170.0, -135.0),
-                (-150.0, -150.0, -125.0),
-                (150.0, -150.0, -125.0),
-            ],
-            dtype=np.float64,
-        )
-
-        focal_length = float(image_w)
-        center = (image_w / 2.0, image_h / 2.0)
-        camera_matrix = np.asarray(
-            [
-                [focal_length, 0.0, center[0]],
-                [0.0, focal_length, center[1]],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
-        dist_coeffs = np.zeros((4, 1), dtype=np.float64)
-
-        ok, rvec, tvec = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
-        if not ok:
-            return 0.0, 0.0, 0.0
-
-        rmat, _ = cv2.Rodrigues(rvec)
-        angles, *_ = cv2.RQDecomp3x3(rmat)
-
-        pitch_deg = float(angles[0])
-        yaw_deg = float(angles[1])
-        roll_deg = float(angles[2])
-        return yaw_deg, pitch_deg, roll_deg
-    except Exception:
-        return 0.0, 0.0, 0.0
+        return _resize_keep_aspect(frame_bgr, target_w)
 
 
 def _annotate_preview(preview_bgr, face_landmarks) -> None:

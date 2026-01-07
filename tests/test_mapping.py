@@ -17,8 +17,8 @@ def _predict(coef: list[float], f: GazeFeatures) -> float:
 def test_fit_linear_mapping_recovers_known_linear_model() -> None:
     # Create a known linear mapping from features -> screen coords.
     # coef length is 1 + len(GazeFeatures.as_list())
-    true_x = np.array([120.0, 500.0, -250.0, 40.0, 10.0, 2.0, -3.0, 1.0, 15.0], dtype=float)
-    true_y = np.array([80.0, -100.0, 300.0, 25.0, -60.0, 1.5, 5.0, -2.0, -8.0], dtype=float)
+    true_x = np.array([120.0, 500.0, -250.0, 40.0, 10.0], dtype=float)
+    true_y = np.array([80.0, -100.0, 300.0, 25.0, -60.0], dtype=float)
 
     rng = np.random.default_rng(123)
 
@@ -29,10 +29,6 @@ def test_fit_linear_mapping_recovers_known_linear_model() -> None:
             left_y=float(rng.uniform(-0.2, 1.2)),
             right_x=float(rng.uniform(-0.2, 1.2)),
             right_y=float(rng.uniform(-0.2, 1.2)),
-            yaw_deg=float(rng.uniform(-30.0, 30.0)),
-            pitch_deg=float(rng.uniform(-20.0, 20.0)),
-            roll_deg=float(rng.uniform(-15.0, 15.0)),
-            face_scale=float(rng.uniform(0.15, 0.45)),
         )
         vec = np.array([1.0, *f.as_list()], dtype=float)
         sx = float(vec @ true_x)
@@ -58,10 +54,6 @@ def test_prediction_uses_5_params() -> None:
         left_y=0.2,
         right_x=0.3,
         right_y=0.4,
-        yaw_deg=1.0,
-        pitch_deg=2.0,
-        roll_deg=3.0,
-        face_scale=0.5,
     )
     coef = [1.0] + [0.0] * len(f.as_list())
     assert abs(_predict(coef, f) - 1.0) < 1e-9

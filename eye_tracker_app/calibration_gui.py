@@ -27,21 +27,32 @@ class CalibrationResult:
     # Linear map from [1, *features] -> screen coords (least squares).
     coef_x: list[float]
     coef_y: list[float]
-    # Face calibration (head pose) normalization.
-    # Normalized pose: (pose - center) / range
-    pose_center_yaw: float
-    pose_center_pitch: float
-    pose_center_roll: float
-    pose_range_yaw: float
-    pose_range_pitch: float
-    pose_range_roll: float
 
 
 def _make_calibration_points(width: int, height: int) -> list[tuple[int, int]]:
-    # 3x3 grid: left/center/right x top/center/bottom
+    # 3x3 grid plus the 4 extreme corners.
     xs = [int(width * 0.15), int(width * 0.50), int(width * 0.85)]
     ys = [int(height * 0.15), int(height * 0.50), int(height * 0.85)]
-    return [(x, y) for y in ys for x in xs]
+
+    corner_pad_x = int(width * 0.02)
+    corner_pad_y = int(height * 0.02)
+    corners = [
+        (corner_pad_x, corner_pad_y),
+        (width - 1 - corner_pad_x, corner_pad_y),
+        (corner_pad_x, height - 1 - corner_pad_y),
+        (width - 1 - corner_pad_x, height - 1 - corner_pad_y),
+    ]
+
+    pts = [(x, y) for y in ys for x in xs] + corners
+    # Preserve order but dedupe in case of tiny screens.
+    seen: set[tuple[int, int]] = set()
+    out: list[tuple[int, int]] = []
+    for p in pts:
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
 
 
 def run_calibration(camera_index: int = 0, show_preview: bool = True) -> Optional[CalibrationResult]:
@@ -97,17 +108,6 @@ def run_calibration(camera_index: int = 0, show_preview: bool = True) -> Optiona
 
     dot_id: Optional[int] = None
 
-    # --- Face calibration (head pose) ---
-    face_steps = [
-        ("Look straight (center) and press SPACE", "center"),
-        ("Turn head LEFT and press SPACE", "left"),
-        ("Turn head RIGHT and press SPACE", "right"),
-        ("Tilt head UP and press SPACE", "up"),
-        ("Tilt head DOWN and press SPACE", "down"),
-    ]
-    face_step_idx = 0
-    face_samples: dict[str, tuple[float, float, float]] = {}
-
     def draw_current_point() -> None:
         nonlocal dot_id
         canvas.delete("dot")
@@ -130,13 +130,6 @@ def run_calibration(camera_index: int = 0, show_preview: bool = True) -> Optiona
             text=f"Calibration: Point {current_idx + 1}/{len(points)} — press SPACE to record (ESC to quit)",
         )
 
-    def draw_face_step() -> None:
-        canvas.delete("dot")
-        canvas.itemconfigure(
-            instructions_id,
-            text=f"Face calibration ({face_step_idx + 1}/{len(face_steps)}): {face_steps[face_step_idx][0]} (ESC to quit)",
-        )
-
     def refresh_status() -> None:
         features, err = gaze.get_latest()
         if err is not None:
@@ -154,24 +147,10 @@ def run_calibration(camera_index: int = 0, show_preview: bool = True) -> Optiona
 
     def on_space(_event: tk.Event) -> None:
         nonlocal current_idx
-        nonlocal face_step_idx
 
         features, err = gaze.get_latest()
         if err is not None or features is None:
             canvas.itemconfigure(status_id, text=f"Can't record yet: {err or 'no features'}")
-            return
-
-        # First: face calibration steps (head pose range capture)
-        if face_step_idx < len(face_steps):
-            key = face_steps[face_step_idx][1]
-            face_samples[key] = (features.yaw_deg, features.pitch_deg, features.roll_deg)
-            face_step_idx += 1
-            if face_step_idx < len(face_steps):
-                draw_face_step()
-                return
-
-            # After face calibration completes, move to point calibration.
-            draw_current_point()
             return
 
         samples.append((features, points[current_idx]))
@@ -187,7 +166,7 @@ def run_calibration(camera_index: int = 0, show_preview: bool = True) -> Optiona
     root.bind("<Escape>", on_escape)
     root.bind("<space>", on_space)
 
-    draw_face_step()
+    draw_current_point()
     refresh_status()
     root.mainloop()
 
@@ -200,28 +179,7 @@ def run_calibration(camera_index: int = 0, show_preview: bool = True) -> Optiona
     if len(samples) < 5:
         return None
 
-    # Compute pose normalization from face calibration.
-    if "center" not in face_samples:
-        return None
-
-    cy, cp, cr = face_samples["center"]
-    # Ranges are based on opposite directions; fall back to safe defaults.
-    yaw_left = face_samples.get("left", (cy - 15.0, cp, cr))[0]
-    yaw_right = face_samples.get("right", (cy + 15.0, cp, cr))[0]
-    pitch_up = face_samples.get("up", (cy, cp - 10.0, cr))[1]
-    pitch_down = face_samples.get("down", (cy, cp + 10.0, cr))[1]
-
-    range_yaw = max(5.0, abs(yaw_right - yaw_left) / 2.0)
-    range_pitch = max(5.0, abs(pitch_down - pitch_up) / 2.0)
-    range_roll = 10.0
-
-    # Normalize pose in samples before fitting so the mapping is less sensitive
-    # to user-specific head pose offsets.
-    norm_samples: list[tuple[GazeFeatures, tuple[int, int]]] = []
-    for f, pt in samples:
-        norm_samples.append((_normalize_features(f, cy, cp, cr, range_yaw, range_pitch, range_roll), pt))
-
-    coef_x, coef_y = _fit_linear_mapping(norm_samples)
+    coef_x, coef_y = _fit_linear_mapping(samples)
 
     return CalibrationResult(
         screen_width=screen_width,
@@ -229,36 +187,6 @@ def run_calibration(camera_index: int = 0, show_preview: bool = True) -> Optiona
         points=points,
         coef_x=coef_x,
         coef_y=coef_y,
-        pose_center_yaw=float(cy),
-        pose_center_pitch=float(cp),
-        pose_center_roll=float(cr),
-        pose_range_yaw=float(range_yaw),
-        pose_range_pitch=float(range_pitch),
-        pose_range_roll=float(range_roll),
-    )
-
-
-def _normalize_features(
-    f: GazeFeatures,
-    cy: float,
-    cp: float,
-    cr: float,
-    ry: float,
-    rp: float,
-    rr: float,
-) -> GazeFeatures:
-    def safe_div(a: float, b: float) -> float:
-        return float(a / b) if abs(b) > 1e-6 else 0.0
-
-    return GazeFeatures(
-        left_x=f.left_x,
-        left_y=f.left_y,
-        right_x=f.right_x,
-        right_y=f.right_y,
-        yaw_deg=safe_div(f.yaw_deg - cy, ry),
-        pitch_deg=safe_div(f.pitch_deg - cp, rp),
-        roll_deg=safe_div(f.roll_deg - cr, rr),
-        face_scale=f.face_scale,
     )
 
 
